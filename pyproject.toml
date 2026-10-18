@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "toolsync"
+version = "1.0.0"
+description = "Scan a tools directory and wire every tool onto PATH — venvs, builds, scripts, binaries and foreign artifacts, callable by name (with and without .py)."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+keywords = ["path", "installer", "symlink", "tooling", "pentest", "linux"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+]
+dependencies = []   # pure standard library
+
+[project.scripts]
+toolsync = "toolsync.cli:main"
+
+[tool.setuptools]
+# Ship only the package. The sync.py shim is replaced by the console entry
+# point above, so it must not be installed as a conflicting top-level module.
+packages = ["toolsync"]
+py-modules = []

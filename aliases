@@ -1,0 +1,4 @@
+# <directory-name> = <command-name>  (one per line - overrides the
+# default command name toolsync would otherwise pick, for tools whose
+# repo/dir name isn't what you actually want to type)
+enum4linux-ng = enum4linux

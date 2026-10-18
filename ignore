@@ -1,0 +1,5 @@
+# one directory name per line - these are skipped entirely by toolsync.
+# (docker/web services, installers, payload bundles with no local CLI entrypoint)
+bloodhound-ce
+metasploit
+Peas
