@@ -6,7 +6,10 @@ Subcommands:
   self-install               put the `toolsync` command on PATH, check PATH
   doctor                     report root/bin/PATH health and offer to fix PATH
   locate <name>              find where a tool lives and how to run it, by
-                             substring/fuzzy match on its directory or command name
+                             substring/fuzzy match on its directory or command
+                             name, falling back to a recursive filename search
+                             (e.g. `locate nc.exe`) when nothing matches at the
+                             top level
 """
 
 import argparse
@@ -271,10 +274,47 @@ def _commands_for(dirpath: Path):
     return names
 
 
+# Noisy subtrees never worth descending into when hunting for a nested file -
+# VCS/cache/build metadata that can be huge (node_modules, .git) and never
+# holds the kind of tool binary/script `locate` is looking for.
+_PRUNE_DIRS = {".git", ".svn", ".hg", "__pycache__", "node_modules", ".venv",
+              "venv", ".pytest_cache", "egg-info"}
+
+_NESTED_FILE_LIMIT = 25  # cap printed nested-file hits so one broad query can't flood the terminal
+
+
+def _find_nested_files(query_norm, skip_dirs):
+    """Walk the whole tools tree looking for a FILE (not a directory) whose
+    name matches `query_norm` - the fallback for "I know the exact filename
+    (e.g. nc.exe) but have no idea which tool directory it's buried in",
+    which the directory/alias/PATH-command matches above can't answer since
+    they only ever look at top-level directory and command names."""
+    hits = []
+    truncated = False
+    for dirpath, dirnames, filenames in os.walk(config.TOOLS_DIR):
+        dirnames[:] = [d for d in dirnames if d not in _PRUNE_DIRS
+                       and not d.endswith(".egg-info")]
+        root = Path(dirpath)
+        if root in skip_dirs or any(p in skip_dirs for p in root.parents):
+            continue
+        for name in filenames:
+            if query_norm in _norm(name):
+                if len(hits) >= _NESTED_FILE_LIMIT:
+                    truncated = True
+                    return hits, truncated
+                hits.append(root / name)
+    return hits, truncated
+
+
 def cmd_locate(argv):
     p = _parser("locate", "Find where a tool lives and how to run it, by "
-                          "substring match on its directory or command name.")
-    p.add_argument("query", help="tool name, directory name, alias, or substring")
+                          "substring match on its directory/command name, or "
+                          "by exact nested filename (e.g. nc.exe buried inside "
+                          "some tool's directory).")
+    p.add_argument("query", help="tool name, directory name, alias, filename, or substring")
+    p.add_argument("--no-walk", action="store_true",
+                   help="skip the slower recursive nested-file search; only match "
+                        "top-level directory/alias/command names")
     args = p.parse_args(argv)
     config.resolve_paths(args.root, args.bin_dir)
     config._ALIASES = load_aliases()
@@ -328,7 +368,15 @@ def cmd_locate(argv):
                 continue
             cmd_hits.append(link)
 
-    if not dir_hits and not cmd_hits:
+    # nested files: only bother walking the tree if the cheap top-level
+    # matches above came up empty - a directory/command hit already answers
+    # "where is it / what do I type", so there's no need to pay for a full
+    # recursive walk when that's already settled.
+    file_hits, file_hits_truncated = [], False
+    if not dir_hits and not cmd_hits and not args.no_walk:
+        file_hits, file_hits_truncated = _find_nested_files(q, covered_dirs)
+
+    if not dir_hits and not cmd_hits and not file_hits:
         print(f"toolsync locate: no match for '{args.query}' under {config.TOOLS_DIR} or {config.BIN_DIR}")
         print("  tip: try a shorter substring, or check .toolsync/aliases for the command name you expect")
         return 1
@@ -352,5 +400,34 @@ def cmd_locate(argv):
             target = "?"
         print(f"{link.name}  (command on PATH)")
         print(f"  -> {target}")
+
+    if file_hits:
+        # a bare filename match here means toolsync hasn't necessarily linked
+        # it onto PATH at all (e.g. a .exe - see SKIP_SUFFIXES) - say so
+        # plainly rather than implying it's runnable as a bare command.
+        bin_targets = {}
+        if config.BIN_DIR.is_dir():
+            for link in config.BIN_DIR.iterdir():
+                try:
+                    bin_targets[link.resolve()] = link.name
+                except OSError:
+                    pass
+        for f in file_hits:
+            try:
+                rel = f.relative_to(config.TOOLS_DIR)
+            except ValueError:
+                rel = f
+            runnable = os.access(f, os.X_OK)
+            on_path = bin_targets.get(f)
+            print(f"{f.name}  (file under {rel.parent})")
+            print(f"  path     {f}")
+            if on_path:
+                print(f"  command  {on_path}")
+            elif runnable:
+                print("  command  (none on PATH - run it by its full path, or toolsync may skip this file type)")
+            else:
+                print("  command  (not executable / not a runnable tool)")
+        if file_hits_truncated:
+            print(f"  ... more than {_NESTED_FILE_LIMIT} files matched - narrow your query to see the rest")
 
     return 0
