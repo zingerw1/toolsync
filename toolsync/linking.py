@@ -53,6 +53,19 @@ def symlink_into_bin(entrypoint: Path, name: str, report):
                 return True
         except OSError:
             pass
+        # An existing exec wrapper (a regular file, not a symlink - written by
+        # write_wrapper_script()/write_runner_wrapper() for tools that need
+        # argv[0] to contain a path) is also "already linked correctly" when
+        # it already execs this exact entrypoint. Without this check, re-
+        # running sync on an already-wrapped tool falls through to the plain
+        # symlink/unlink logic below and clobbers the working wrapper with a
+        # bare symlink, breaking the tool.
+        if not link.is_symlink() and link.is_file():
+            try:
+                if str(entrypoint) in link.read_text(errors="ignore"):
+                    return True
+            except OSError:
+                pass
         # It's "ours" but points at a different entrypoint than this call -
         # fine if that's the *same* tool directory (e.g. its venv/binary
         # path legitimately changed), but if it's a *different* tools/

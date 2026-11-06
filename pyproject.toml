@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "toolsync"
 version = "1.0.0"
 description = "Scan a tools directory and wire every tool onto PATH — venvs, builds, scripts, binaries and foreign artifacts, callable by name (with and without .py)."
-readme = "README.md"
+readme = "TOOLSYNC.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 keywords = ["path", "installer", "symlink", "tooling", "pentest", "linux"]

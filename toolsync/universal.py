@@ -5,10 +5,13 @@ Subcommands:
                              root, or link a lone script in place)
   self-install               put the `toolsync` command on PATH, check PATH
   doctor                     report root/bin/PATH health and offer to fix PATH
+  locate <name>              find where a tool lives and how to run it, by
+                             substring/fuzzy match on its directory or command name
 """
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -17,13 +20,14 @@ from pathlib import Path
 from . import config
 from .fsutil import chmod_x, dir_signature, fix_shebang
 from .handlers import run_pipeline
-from .linking import command_name_for, link_and_verify
+from .linking import command_name_for, existing_link_is_ours, link_and_verify
 from .report import print_report
 from .state import load_aliases, load_state, save_state
 
 
 def dispatch(cmd, argv):
-    return {"add": cmd_add, "self-install": cmd_self_install, "doctor": cmd_doctor}[cmd](argv)
+    return {"add": cmd_add, "self-install": cmd_self_install, "doctor": cmd_doctor,
+           "locate": cmd_locate}[cmd](argv)
 
 
 def _parser(sub, desc):
@@ -231,3 +235,122 @@ def cmd_add(argv):
     for target in args.target:
         _add_one(target, report)
     print_report(report, empty_msg="toolsync add: nothing linked.")
+
+
+# ── locate ──────────────────────────────────────────────────────────────────
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def _commands_for(dirpath: Path):
+    """Every command in config.BIN_DIR that actually runs something inside
+    `dirpath` - a plain symlink resolving under it, or a toolsync-written
+    wrapper script whose exec line names a path under it. Lets `locate`
+    answer "what do I type" even for tools linked under a different name
+    (aliases, raw-name variants, multi-binary subtools)."""
+    names = []
+    if not config.BIN_DIR.is_dir():
+        return names
+    try:
+        real_dir = dirpath.resolve()
+    except OSError:
+        return names
+    for link in sorted(config.BIN_DIR.iterdir()):
+        try:
+            if link.is_symlink():
+                target = link.resolve()
+                if target == real_dir or real_dir in target.parents:
+                    names.append(link.name)
+                continue
+            if link.is_file() and existing_link_is_ours(link):
+                text = link.read_text(errors="ignore")
+                if str(real_dir) in text:
+                    names.append(link.name)
+        except OSError:
+            continue
+    return names
+
+
+def cmd_locate(argv):
+    p = _parser("locate", "Find where a tool lives and how to run it, by "
+                          "substring match on its directory or command name.")
+    p.add_argument("query", help="tool name, directory name, alias, or substring")
+    args = p.parse_args(argv)
+    config.resolve_paths(args.root, args.bin_dir)
+    config._ALIASES = load_aliases()
+    state = load_state()
+
+    if not config.TOOLS_DIR.is_dir():
+        print(f"toolsync locate: tools root {config.TOOLS_DIR} doesn't exist")
+        return 1
+
+    q = _norm(args.query)
+    if not q:
+        print("toolsync locate: empty query")
+        return 1
+
+    # directories whose own name, or whose alias command name, contains the
+    # query (or vice versa, so a short alias like 'nxc' still finds a longer
+    # directory name that contains it)
+    dir_hits = []
+    for entry in sorted(config.TOOLS_DIR.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        keys = [_norm(entry.name)]
+        alias = config._ALIASES.get(entry.name)
+        if alias:
+            keys.append(_norm(alias))
+        if any(q in k or k in q for k in keys):
+            dir_hits.append(entry)
+
+    # commands already on PATH (BIN_DIR) whose name matches, even when the
+    # directory name itself doesn't (e.g. a multi-binary tool's individual
+    # subtool commands) - reported in addition to, not instead of, dir_hits,
+    # but skipped if they just point into a directory already listed there
+    # (its `command` line already names them).
+    covered_dirs = set()
+    for h in dir_hits:
+        try:
+            covered_dirs.add(h.resolve())
+        except OSError:
+            pass
+    cmd_hits = []
+    if config.BIN_DIR.is_dir():
+        for link in sorted(config.BIN_DIR.iterdir()):
+            if q not in _norm(link.name):
+                continue
+            try:
+                target = link.resolve() if link.is_symlink() else None
+            except OSError:
+                target = None
+            if target is not None and (target in covered_dirs
+                                       or any(d in target.parents for d in covered_dirs)):
+                continue
+            cmd_hits.append(link)
+
+    if not dir_hits and not cmd_hits:
+        print(f"toolsync locate: no match for '{args.query}' under {config.TOOLS_DIR} or {config.BIN_DIR}")
+        print("  tip: try a shorter substring, or check .toolsync/aliases for the command name you expect")
+        return 1
+
+    for entry in dir_hits:
+        st = state.get(entry.name, {})
+        if entry.name in state:
+            status = "linked, verified ok" if st.get("ok") else "synced, but not runnable (see --explain)"
+        else:
+            status = "not yet synced (run toolsync)"
+        commands = _commands_for(entry)
+        print(f"{entry.name}")
+        print(f"  path     {entry}")
+        print(f"  command  {', '.join(commands) if commands else '(none on PATH yet)'}")
+        print(f"  status   {status}")
+
+    for link in cmd_hits:
+        try:
+            target = link.resolve() if link.is_symlink() else f"wrapper -> {link}"
+        except OSError:
+            target = "?"
+        print(f"{link.name}  (command on PATH)")
+        print(f"  -> {target}")
+
+    return 0

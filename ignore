@@ -3,3 +3,8 @@
 bloodhound-ce
 metasploit
 Peas
+
+# a `*.ext` line skips that whole file type everywhere - any directory whose
+# only entrypoint is that type is left alone (no wine/mono wrapper, no link),
+# so new tools of that type are covered automatically without listing dirs.
+*.exe

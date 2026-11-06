@@ -78,6 +78,11 @@ DEFAULT_IGNORE = [
     "bloodhound-ce",
     "metasploit",
     "Peas",
+    "",
+    "# a `*.ext` line instead skips that whole file type everywhere, so a",
+    "# directory holding only files of that type is never wrapped/linked -",
+    "# e.g. '*.exe' to keep Windows target binaries copy-only, without having",
+    "# to name every directory that ships one.",
 ]
 
 # Directory -> command-name overrides; loaded from ALIASES_FILE by the CLI.

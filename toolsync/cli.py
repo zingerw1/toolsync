@@ -61,7 +61,7 @@ def git_pull(dirpath: Path, report) -> bool:
     return True
 
 
-SUBCOMMANDS = ("add", "self-install", "doctor")
+SUBCOMMANDS = ("add", "self-install", "doctor", "locate")
 
 
 def main():
@@ -77,7 +77,7 @@ def run_sync():
     parser = argparse.ArgumentParser(
         prog="toolsync",
         description="Scan a tools directory and wire every tool onto PATH. "
-                    "Subcommands: add, self-install, doctor.")
+                    "Subcommands: add, self-install, doctor, locate.")
     parser.add_argument("--update", action="store_true", help="git pull clean repos before syncing")
     parser.add_argument("--force", metavar="NAME", action="append", default=[], help="re-run install+verify for this tool even if unchanged (repeatable)")
     parser.add_argument("--force-all", action="store_true", help="re-run install+verify for every tool")

@@ -18,6 +18,7 @@ from .linking import (command_name_for, existing_link_is_ours, link_and_verify,
                       link_case_aliases, link_entrypoint_variants,
                       symlink_into_bin, write_runner_wrapper)
 from .runners import FOREIGN_RUNNERS, FOREIGN_SUFFIXES
+from .state import load_ignore_extensions
 from .state import InstallResult
 from .verify import detect_missing_apt_pkgs, verify_runs
 
@@ -173,7 +174,14 @@ def handle_cargo(dirpath: Path, report) -> InstallResult | None:
         return InstallResult(ok=False)
     bin_name = dirpath.name
     try:
+        in_package = False
         for line in manifest.read_text().splitlines():
+            section = re.match(r'^\s*\[([^\]]+)\]', line)
+            if section:
+                in_package = section.group(1).strip() == "package"
+                continue
+            if not in_package:
+                continue
             m = re.match(r'^\s*name\s*=\s*"([^"]+)"', line)
             if m:
                 bin_name = m.group(1)
@@ -269,7 +277,7 @@ def venv_usable(venv_dir: Path) -> bool:
     if not python3.exists():
         return False
     try:
-        r = subprocess.run([str(python3), "-m", "pip", "--version"], capture_output=True, timeout=10)
+        r = subprocess.run([str(python3), "-m", "pip", "--version"], cwd=str(venv_dir), capture_output=True, timeout=10)
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -291,7 +299,7 @@ def setup_python_project(dirpath: Path, report) -> InstallResult:
         report.append(("WARN", dirpath.name, "existing venv/ is broken (stale interpreter path) - rebuilding it"))
         shutil.rmtree(venv_dir, ignore_errors=True)
     if not venv_dir.exists():
-        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
+        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], cwd=str(dirpath), check=True)
         created = True
     # Always invoke pip via `python3 -m pip`, never by exec'ing the `pip`
     # script directly - that script's own shebang hardcodes an absolute
@@ -304,9 +312,9 @@ def setup_python_project(dirpath: Path, report) -> InstallResult:
     missing_apt_pkgs = set()
 
     if created or req.exists() or has_package:
-        subprocess.run([*pip_cmd, "install", "--upgrade", "pip", "-q"], check=False)
+        subprocess.run([*pip_cmd, "install", "--upgrade", "pip", "-q"], cwd=str(dirpath), check=False)
     if req.exists():
-        r = subprocess.run([*pip_cmd, "install", "-q", "-r", str(req)], capture_output=True, text=True)
+        r = subprocess.run([*pip_cmd, "install", "-q", "-r", str(req)], cwd=str(dirpath), capture_output=True, text=True)
         if r.returncode != 0:
             missing_apt_pkgs |= detect_missing_apt_pkgs(r.stderr)
             report.append(("WARN", dirpath.name, f"some requirements.txt deps failed to install: {r.stderr.strip().splitlines()[-1] if r.stderr else ''}"))
@@ -322,7 +330,7 @@ def setup_python_project(dirpath: Path, report) -> InstallResult:
             except Exception:
                 deps = []
             if deps:
-                r2 = subprocess.run([*pip_cmd, "install", "-q", *deps], capture_output=True, text=True)
+                r2 = subprocess.run([*pip_cmd, "install", "-q", *deps], cwd=str(dirpath), capture_output=True, text=True)
                 if r2.returncode != 0:
                     missing_apt_pkgs |= detect_missing_apt_pkgs(r2.stderr)
                     report.append(("WARN", dirpath.name, f"failed installing pyproject.toml dependencies: {r2.stderr.strip().splitlines()[-1] if r2.stderr else ''}"))
@@ -585,6 +593,9 @@ def handle_foreign(dirpath: Path, report) -> InstallResult | None:
     if not found:
         return None
     ep, suffix = found
+    if suffix in load_ignore_extensions():
+        report.append(("SKIP", dirpath.name, f"{suffix} artifact matches a '*{suffix}' entry in .toolsync/ignore - left as-is, not wrapped/linked"))
+        return InstallResult(ok=False)
     primary = command_name_for(dirpath)
     ok = _link_foreign(ep, suffix, primary, report, dirpath.name)
     return InstallResult(ok=ok, entrypoint=None)
@@ -658,6 +669,12 @@ def process_loose_file(path: Path, report):
     except OSError:
         return
     if real.parent != config.TOOLS_DIR and config.TOOLS_DIR in real.parents:
+        return
+    # A symlink resolving entirely outside TOOLS_DIR (e.g. into the user's
+    # home directory or elsewhere on disk) must also be left alone - writing
+    # through it via fix_shebang() below would mutate a file that has
+    # nothing to do with toolsync.
+    if path.is_symlink() and real.parent != config.TOOLS_DIR and config.TOOLS_DIR not in real.parents:
         return
     changed = fix_shebang(path, "/usr/bin/env python3")
     if changed:

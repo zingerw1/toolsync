@@ -2,6 +2,7 @@
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .config import MISSING_HEADER_TO_APT_PKG
@@ -24,11 +25,19 @@ def verify_runs(entrypoint: Path, extra_env=None):
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
+    # `entrypoint` is sometimes a filesystem Path and sometimes a bare
+    # command name meant to be resolved via PATH - in the latter case there
+    # is no directory to call it "from", so run it from a directory that is
+    # always guaranteed to exist rather than silently inheriting whatever
+    # arbitrary (and possibly since-deleted) directory the caller's shell
+    # happened to be sitting in.
+    run_dir = os.path.dirname(str(entrypoint)) or tempfile.gettempdir()
+    last_failure = None
     for flag in ("--help", "-h"):
         try:
             r = subprocess.run(
                 [str(entrypoint), flag],
-                capture_output=True, text=True, timeout=10, env=env,
+                cwd=run_dir, capture_output=True, text=True, timeout=10, env=env,
             )
         except subprocess.TimeoutExpired:
             return True, ""  # started fine, just didn't exit - good enough
@@ -41,7 +50,8 @@ def verify_runs(entrypoint: Path, extra_env=None):
         )
         if any(m in combined for m in bad_markers):
             tail = combined.strip().splitlines()
-            return False, tail[-1] if tail else "unknown import error"
+            last_failure = tail[-1] if tail else "unknown import error"
+            continue  # this flag looked broken - give the other flag a chance
         # Some compiled tools print a short fatal error and still exit 0
         # (e.g. john the ripper's "Cannot find John home" when argv[0]
         # doesn't contain a path) - argparse/click's "exit 2 on an
@@ -53,9 +63,12 @@ def verify_runs(entrypoint: Path, extra_env=None):
         looks_like_error = bool(re.search(r"\berror\b", lower)) or "cannot find" in lower
         if looks_like_error and not looks_like_help and len(combined) < 500:
             tail = combined.strip().splitlines()
-            return False, tail[-1] if tail else "unrecognized error"
+            last_failure = tail[-1] if tail else "unrecognized error"
+            continue  # this flag looked broken - give the other flag a chance
         # argparse/click/etc. exit 2 on unrecognized flag but still "ran" -
         # that counts as success (the program started). A hard crash (big
         # traceback with no flag recognition) was already caught above.
         return True, ""
+    if last_failure is not None:
+        return False, last_failure
     return True, ""
