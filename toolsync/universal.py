@@ -354,18 +354,27 @@ def _find_nested_files(query, skip_dirs):
     return hits, truncated
 
 
+_INNER_FILE_LIMIT = 10  # cap per-directory inner matches, same reasoning as _NESTED_FILE_LIMIT
+
+
 def _files_inside(dirpath: Path, query: str):
-    """Non-recursive: files directly under `dirpath` whose name matches
-    `query` more specifically than the directory's own name did - e.g.
-    querying 'nc64' against the 'nc64' directory should surface
-    nc64/nc64.exe itself, not just the directory it lives in."""
+    """Files ANYWHERE under `dirpath` (not just direct children) whose name
+    matches `query` more specifically than the directory's own name did -
+    e.g. querying 'mimikatz' should surface mimikatz/x64/mimikatz.exe itself,
+    not just the containing directory or a shallower, less relevant sibling
+    file one level up (mimikatz/mimicom.idl) that happened to match first.
+    Many real tools ship their actual binary a level or two below the repo
+    root (x64/, Win32/, bin/, release/, ...), so a direct-children-only check
+    would miss exactly the file `locate` exists to find."""
     hits = []
-    try:
-        for child in sorted(dirpath.iterdir()):
-            if child.is_file() and _matches(query, child.name):
-                hits.append(child)
-    except OSError:
-        pass
+    for root, dirnames, filenames in os.walk(dirpath):
+        dirnames[:] = [d for d in dirnames if d not in _PRUNE_DIRS
+                       and not d.endswith(".egg-info")]
+        for name in sorted(filenames):
+            if _matches(query, name):
+                hits.append(Path(root) / name)
+                if len(hits) >= _INNER_FILE_LIMIT:
+                    return hits
     return hits
 
 
