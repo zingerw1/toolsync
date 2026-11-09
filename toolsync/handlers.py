@@ -20,6 +20,7 @@ from .linking import (command_name_for, existing_link_is_ours, link_and_verify,
 from .runners import FOREIGN_RUNNERS, FOREIGN_SUFFIXES
 from .state import load_ignore_extensions
 from .state import InstallResult
+from .ui import STATUS
 from .verify import detect_missing_apt_pkgs, verify_runs
 
 
@@ -47,6 +48,7 @@ def handle_archive(dirpath: Path, report) -> InstallResult | None:
         return None
     archive = archives[0]
     suffix = archive.suffix.lower()
+    STATUS.update(dirpath.name, f"extracting {archive.name}")
 
     def give_up(msg, level="FAIL"):
         _ARCHIVE_GIVE_UP.add(dirpath)
@@ -136,6 +138,7 @@ def handle_nested_clone(dirpath: Path, report) -> InstallResult | None:
 
 
 def _run_build(cmd, cwd, dirpath, report, what) -> bool:
+    STATUS.update(dirpath.name, f"running: {' '.join(cmd)}")
     try:
         r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=1800)
     except FileNotFoundError:
@@ -299,6 +302,7 @@ def setup_python_project(dirpath: Path, report) -> InstallResult:
         report.append(("WARN", dirpath.name, "existing venv/ is broken (stale interpreter path) - rebuilding it"))
         shutil.rmtree(venv_dir, ignore_errors=True)
     if not venv_dir.exists():
+        STATUS.update(dirpath.name, "creating venv")
         subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], cwd=str(dirpath), check=True)
         created = True
     # Always invoke pip via `python3 -m pip`, never by exec'ing the `pip`
@@ -312,13 +316,16 @@ def setup_python_project(dirpath: Path, report) -> InstallResult:
     missing_apt_pkgs = set()
 
     if created or req.exists() or has_package:
+        STATUS.update(dirpath.name, "upgrading pip")
         subprocess.run([*pip_cmd, "install", "--upgrade", "pip", "-q"], cwd=str(dirpath), check=False)
     if req.exists():
+        STATUS.update(dirpath.name, "pip install -r requirements.txt")
         r = subprocess.run([*pip_cmd, "install", "-q", "-r", str(req)], cwd=str(dirpath), capture_output=True, text=True)
         if r.returncode != 0:
             missing_apt_pkgs |= detect_missing_apt_pkgs(r.stderr)
             report.append(("WARN", dirpath.name, f"some requirements.txt deps failed to install: {r.stderr.strip().splitlines()[-1] if r.stderr else ''}"))
     if has_package:
+        STATUS.update(dirpath.name, "pip install .")
         r = subprocess.run([*pip_cmd, "install", "-q", "."], cwd=str(dirpath), capture_output=True, text=True)
         if r.returncode != 0 and pyproject.exists():
             # not every pyproject.toml is an installable package (e.g. "package = false"
@@ -330,6 +337,7 @@ def setup_python_project(dirpath: Path, report) -> InstallResult:
             except Exception:
                 deps = []
             if deps:
+                STATUS.update(dirpath.name, "pip install (pyproject dependencies)")
                 r2 = subprocess.run([*pip_cmd, "install", "-q", *deps], cwd=str(dirpath), capture_output=True, text=True)
                 if r2.returncode != 0:
                     missing_apt_pkgs |= detect_missing_apt_pkgs(r2.stderr)

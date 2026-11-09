@@ -14,16 +14,18 @@ from .handlers import process_loose_file, run_pipeline
 from .linking import command_name_for, link_and_verify
 from .report import report_duplicate_dirnames
 from .state import load_aliases, load_ignore, load_state, save_state
+from .ui import STATUS
 
 
-def maybe_install_apt_pkgs(pkgs: set, report, assume_yes: bool):
+def maybe_install_apt_pkgs(pkgs: set, report, assume_yes: bool) -> bool:
+    """Returns True if packages were (successfully) installed this run."""
     if not pkgs:
-        return
+        return False
     pkgs = sorted(pkgs)
     print(f"\ntoolsync: missing system build dependencies detected: {' '.join(pkgs)}")
     if not shutil.which("apt-get"):
         print(f"  install them with your distro's package manager, then re-run toolsync.")
-        return
+        return False
     if assume_yes:
         answer = "y"
     else:
@@ -35,22 +37,25 @@ def maybe_install_apt_pkgs(pkgs: set, report, assume_yes: bool):
             answer = "n"
     if answer != "y":
         print(f"  skipped. install manually with: sudo apt-get install -y {' '.join(pkgs)}")
-        return
+        return False
     r = subprocess.run(["sudo", "apt-get", "install", "-y", *pkgs])
     if r.returncode != 0:
         print("  apt-get install failed - see output above.")
-    else:
-        print("  installed. re-run toolsync (or toolsync --force-all) to retry the affected tools.")
+        return False
+    print("  installed.")
+    return True
 
 
 def git_pull(dirpath: Path, report) -> bool:
     """Returns True if repo is now at a state worth re-scanning."""
     if not (dirpath / ".git").exists():
         return False
+    STATUS.update(dirpath.name, "checking git status")
     status = subprocess.run(["git", "status", "--porcelain"], cwd=str(dirpath), capture_output=True, text=True)
     if status.stdout.strip():
         report.append(("SKIP", dirpath.name, "local changes present - not pulling (commit/stash first, or use `git pull` yourself)"))
         return False
+    STATUS.update(dirpath.name, "git pull")
     r = subprocess.run(["git", "pull", "--ff-only"], cwd=str(dirpath), capture_output=True, text=True)
     if r.returncode != 0:
         report.append(("WARN", dirpath.name, f"git pull failed: {r.stderr.strip().splitlines()[-1] if r.stderr else ''}"))
@@ -59,6 +64,58 @@ def git_pull(dirpath: Path, report) -> bool:
         return False
     report.append(("OK", dirpath.name, "pulled latest from git"))
     return True
+
+
+def sync_dir(entry: Path, force: bool, args, state, report) -> set:
+    """Install+link a single tool directory, update its state entry in
+    place, and return whatever apt packages it's still missing."""
+    name = entry.name
+    alias_tag = config._ALIASES.get(name, "")
+    missing_apt_pkgs = set()
+    ok = False
+    try:
+        if not os.access(entry, os.R_OK | os.X_OK):
+            return missing_apt_pkgs
+
+        if args.update:
+            git_pull(entry, report)
+
+        sig = dir_signature(entry) + "|" + alias_tag
+        prev = state.get(name)
+        stale_version = prev is not None and prev.get("toolsync_ver", 0) < TOOLSYNC_VERSION
+        if prev and prev.get("sig") == sig and not force and not stale_version:
+            return missing_apt_pkgs  # unchanged since last successful sync
+
+        result = run_pipeline(entry, report)
+        missing_apt_pkgs |= result.missing_apt_pkgs
+        ok = result.ok
+
+        if result.entrypoint is not None:
+            STATUS.update(name, "linking onto PATH")
+            name_for = command_name_for(entry)
+            ok = link_and_verify(result.entrypoint, name_for, report, name)
+    except PermissionError:
+        return missing_apt_pkgs
+    except subprocess.CalledProcessError as e:
+        report.append(("FAIL", name, f"setup failed: {e}"))
+        ok = False
+    except Exception as e:
+        # A single tool's installer misbehaving (crash, unexpected
+        # exception from a build tool, etc.) must never take down the
+        # whole sync - report it and keep going to the next tool.
+        report.append(("FAIL", name, f"unexpected error: {type(e).__name__}: {e}"))
+        ok = False
+
+    # Re-snapshot *after* setup: installers (setup.py/pip/make/cargo) can
+    # leave build artifacts with fresh mtimes in-tree, so the stored
+    # signature must reflect the settled post-install state, or every
+    # run looks "changed".
+    state[name] = {
+        "sig": dir_signature(entry) + "|" + alias_tag,
+        "ok": bool(ok),
+        "toolsync_ver": TOOLSYNC_VERSION,
+    }
+    return missing_apt_pkgs
 
 
 SUBCOMMANDS = ("add", "self-install", "doctor", "locate")
@@ -83,6 +140,8 @@ def run_sync():
     parser.add_argument("--force-all", action="store_true", help="re-run install+verify for every tool")
     parser.add_argument("--explain", metavar="NAME", help="print the last recorded notes for this tool and exit")
     parser.add_argument("--yes", "-y", action="store_true", help="auto-confirm apt-get installs for missing build deps")
+    parser.add_argument("--fix", action="store_true", help="try to auto-resolve WARN/FAIL entries: auto-confirm missing apt deps "
+                         "(implies --yes) and automatically retry the tools that needed them, without a second manual run")
     parser.add_argument("--root", metavar="DIR", help="tools directory to scan (default: ~/tools, or $TOOLSYNC_ROOT / config file)")
     parser.add_argument("--bin", metavar="DIR", dest="bin_dir", help="where to put the PATH links (default: ~/.local/bin, or $TOOLSYNC_BIN)")
     args = parser.parse_args()
@@ -107,67 +166,48 @@ def run_sync():
 
     force_names = set(args.force)
     all_missing_apt_pkgs = set()
+    needs_pkgs = {}  # tool name -> set of apt pkgs it was missing, for the --fix retry pass
 
-    for entry in sorted(config.TOOLS_DIR.iterdir()):
-        name = entry.name
-        if name.startswith(".") or name in ignore:
-            continue
+    entries = [e for e in sorted(config.TOOLS_DIR.iterdir())
+               if not (e.name.startswith(".") or e.name in ignore)]
 
-        if entry.is_file() or entry.is_symlink():
-            if entry.suffix in SKIP_SUFFIXES or name in SKIP_NAMES:
-                continue
-            process_loose_file(entry, report)
-            continue
+    STATUS.start()
+    try:
+        for entry in entries:
+            name = entry.name
+            STATUS.update(name, "scanning")
 
-        if not entry.is_dir():
-            continue
-
-        alias_tag = config._ALIASES.get(name, "")
-        try:
-            if not os.access(entry, os.R_OK | os.X_OK):
+            if entry.is_file() or entry.is_symlink():
+                if entry.suffix in SKIP_SUFFIXES or name in SKIP_NAMES:
+                    continue
+                process_loose_file(entry, report)
                 continue
 
-            if args.update:
-                git_pull(entry, report)
+            if not entry.is_dir():
+                continue
 
-            sig = dir_signature(entry) + "|" + alias_tag
-            prev = state.get(name)
             force = args.force_all or name in force_names
-            stale_version = prev is not None and prev.get("toolsync_ver", 0) < TOOLSYNC_VERSION
-            if prev and prev.get("sig") == sig and not force and not stale_version:
-                continue  # unchanged since last successful sync, and toolsync logic hasn't moved on
+            missing = sync_dir(entry, force, args, state, report)
+            if missing:
+                all_missing_apt_pkgs |= missing
+                needs_pkgs[name] = missing
+    finally:
+        STATUS.stop()
 
-            result = run_pipeline(entry, report)
-            all_missing_apt_pkgs |= result.missing_apt_pkgs
-            ok = result.ok
-
-            if result.entrypoint is not None:
-                name_for = command_name_for(entry)
-                ok = link_and_verify(result.entrypoint, name_for, report, name)
-        except PermissionError:
-            continue
-        except subprocess.CalledProcessError as e:
-            report.append(("FAIL", name, f"setup failed: {e}"))
-            ok = False
-        except Exception as e:
-            # A single tool's installer misbehaving (crash, unexpected
-            # exception from a build tool, etc.) must never take down the
-            # whole sync - report it and keep going to the next tool.
-            report.append(("FAIL", name, f"unexpected error: {type(e).__name__}: {e}"))
-            ok = False
-
-        # Re-snapshot *after* setup: installers (setup.py/pip/make/cargo) can
-        # leave build artifacts with fresh mtimes in-tree, so the stored
-        # signature must reflect the settled post-install state, or every
-        # run looks "changed".
-        state[name] = {
-            "sig": dir_signature(entry) + "|" + alias_tag,
-            "ok": bool(ok),
-            "toolsync_ver": TOOLSYNC_VERSION,
-        }
+    if args.fix and all_missing_apt_pkgs:
+        installed = maybe_install_apt_pkgs(all_missing_apt_pkgs, report, assume_yes=True)
+        if installed:
+            print(f"\ntoolsync --fix: retrying {len(needs_pkgs)} tool(s) now that their build deps are installed...")
+            STATUS.start()
+            try:
+                for name in needs_pkgs:
+                    sync_dir(config.TOOLS_DIR / name, force=True, args=args, state=state, report=report)
+            finally:
+                STATUS.stop()
+    else:
+        maybe_install_apt_pkgs(all_missing_apt_pkgs, report, assume_yes=args.yes)
 
     save_state(state)
-    maybe_install_apt_pkgs(all_missing_apt_pkgs, report, assume_yes=args.yes)
 
     if not report:
         print("toolsync: everything already up to date.")
