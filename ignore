@@ -7,4 +7,9 @@ Peas
 # a `*.ext` line skips that whole file type everywhere - any directory whose
 # only entrypoint is that type is left alone (no wine/mono wrapper, no link),
 # so new tools of that type are covered automatically without listing dirs.
-*.exe
+#
+# `*.exe` is OFF here, so Windows tools are callable by name: run through
+# mono (.NET) or wine when installed, otherwise linked onto PATH as-is so
+# `nc64.exe` / `which procdump64.exe` find the file (for transferring to a
+# target). Uncomment the next line to keep every .exe copy-only instead:
+# *.exe
