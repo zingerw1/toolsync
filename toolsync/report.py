@@ -2,23 +2,35 @@
 import re
 from pathlib import Path
 
-_TAGS = {"OK": "OK   ", "SKIP": "SKIP ", "WARN": "WARN ", "CONFLICT": "CONFL", "FAIL": "FAIL "}
+from .ui import C, rule
+
+# level -> (glyph, colour attribute on ui.C, summary word)
+_STYLE = {
+    "OK":       ("✔", "green",  "ok"),
+    "SKIP":     ("–", "gray",   "skipped"),
+    "WARN":     ("▲", "yellow", "warnings"),
+    "CONFLICT": ("◆", "yellow", "conflicts"),
+    "FAIL":     ("✘", "red",    "failed"),
+}
 
 
-def print_report(report, empty_msg="toolsync: nothing to do."):
-    """Print aligned [TAG] name  msg lines plus a one-line count summary."""
+def print_report(report, empty_msg="toolsync: nothing to do.", elapsed=None):
+    """Print one glyph-marked line per entry, then a thin rule and a count line."""
     if not report:
-        print(empty_msg)
+        print(f"  {C.gray}{empty_msg}{C.reset}")
         return
     width = max(len(r[1]) for r in report)
+    print(rule("report"))
     for level, name, msg in report:
-        print(f"[{_TAGS[level]}] {name.ljust(width)}  {msg}")
-    counts = {k: 0 for k in _TAGS}
+        glyph, colour, _ = _STYLE[level]
+        print(f"  {getattr(C, colour)}{glyph}{C.reset}  {C.white}{name.ljust(width)}{C.reset}  {C.gray}{msg}{C.reset}")
+    counts = {k: 0 for k in _STYLE}
     for level, _, _ in report:
         counts[level] += 1
-    summary = " · ".join(f"{k} {v}" for k, v in counts.items() if v)
-    if summary:
-        print(f"\n{summary}")
+    parts = [f"{getattr(C, _STYLE[k][1])}{v} {_STYLE[k][2]}{C.reset}" for k, v in counts.items() if v]
+    took = f"   {C.gray}in {elapsed:.1f}s{C.reset}" if elapsed is not None else ""
+    print(rule())
+    print("  " + "   ".join(parts) + took)
 
 
 def report_duplicate_dirnames(tools_dir: Path, ignore: set, report):

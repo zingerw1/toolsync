@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import config
@@ -12,9 +13,9 @@ from .config import (SKIP_NAMES, SKIP_SUFFIXES, TOOLSYNC_VERSION)
 from .fsutil import dir_signature
 from .handlers import process_loose_file, run_pipeline
 from .linking import command_name_for, link_and_verify
-from .report import report_duplicate_dirnames
+from .report import print_report, report_duplicate_dirnames
 from .state import load_aliases, load_ignore, load_state, save_state
-from .ui import STATUS
+from .ui import C, STATUS, rule
 
 
 def maybe_install_apt_pkgs(pkgs: set, report, assume_yes: bool) -> bool:
@@ -188,19 +189,24 @@ def run_sync():
     entries = [e for e in sorted(config.TOOLS_DIR.iterdir())
                if not (e.name.startswith(".") or e.name in ignore)]
 
-    STATUS.start()
+    t0 = time.monotonic()
+    print(rule("toolsync"))
+    print(f"  {C.gray}scanning{C.reset} {config.TOOLS_DIR} {C.gray}· {len(entries)} entries{C.reset}\n")
+
+    STATUS.start(len(entries))
     try:
         for entry in entries:
             name = entry.name
             STATUS.update(name, "scanning")
 
             if entry.is_file() or entry.is_symlink():
-                if entry.suffix in SKIP_SUFFIXES or name in SKIP_NAMES:
-                    continue
-                process_loose_file(entry, report)
+                if not (entry.suffix in SKIP_SUFFIXES or name in SKIP_NAMES):
+                    process_loose_file(entry, report)
+                STATUS.advance()
                 continue
 
             if not entry.is_dir():
+                STATUS.advance()
                 continue
 
             force = args.force_all or name in force_names
@@ -208,17 +214,20 @@ def run_sync():
             if missing:
                 all_missing_apt_pkgs |= missing
                 needs_pkgs[name] = missing
+            STATUS.advance()
     finally:
         STATUS.stop()
 
     if args.fix and all_missing_apt_pkgs:
         installed = maybe_install_apt_pkgs(all_missing_apt_pkgs, report, assume_yes=True)
         if installed:
-            print(f"\ntoolsync --fix: retrying {len(needs_pkgs)} tool(s) now that their build deps are installed...")
-            STATUS.start()
+            print(f"\n  {C.gray}--fix: retrying {len(needs_pkgs)} tool(s) now that their build deps are installed{C.reset}")
+            STATUS.start(len(needs_pkgs))
             try:
                 for name in needs_pkgs:
+                    STATUS.update(name, "retrying")
                     sync_dir(config.TOOLS_DIR / name, force=True, args=args, state=state, report=report)
+                    STATUS.advance()
             finally:
                 STATUS.stop()
     else:
@@ -226,17 +235,4 @@ def run_sync():
 
     save_state(state)
 
-    if not report:
-        print("toolsync: everything already up to date.")
-        return
-
-    tags = {"OK": "OK   ", "SKIP": "SKIP ", "WARN": "WARN ", "CONFLICT": "CONFL", "FAIL": "FAIL "}
-    width = max(len(r[1]) for r in report)
-    for level, name, msg in report:
-        print(f"[{tags[level]}] {name.ljust(width)}  {msg}")
-
-    counts = {k: 0 for k in tags}
-    for level, _, _ in report:
-        counts[level] += 1
-    summary = " · ".join(f"{k} {v}" for k, v in counts.items() if v)
-    print(f"\n{summary}")
+    print_report(report, empty_msg="everything already up to date.", elapsed=time.monotonic() - t0)
