@@ -74,6 +74,16 @@ to override the defaults.
 
 Run `toolsync --help` for the full flag reference.
 
+## Development
+
+The tests are plain asserts with no dependencies:
+
+```bash
+python3 tests/test_toolsync.py
+```
+
+Python 3.10 or newer is required.
+
 ## License
 
 MIT
