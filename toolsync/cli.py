@@ -118,7 +118,23 @@ def sync_dir(entry: Path, force: bool, args, state, report) -> set:
     return missing_apt_pkgs
 
 
-SUBCOMMANDS = ("add", "self-install", "doctor", "locate")
+# subcommand -> (usage shown in --help, one-line description). The single
+# source of truth: main() dispatches on these names and `toolsync --help`
+# lists them, so a subcommand can't be added to one and forgotten in the other
+# (tests/test_toolsync.py checks both).
+SUBCOMMANDS = {
+    "add":          ("add <path|git-url>", "install a tool from a path or git URL"),
+    "self-install": ("self-install",       "put toolsync itself on PATH"),
+    "doctor":       ("doctor",             "check root/bin/PATH health, offer to fix PATH"),
+    "locate":       ("locate <name>",      "find where a tool lives and how to run it"),
+}
+
+
+def _subcommand_help():
+    width = max(len(usage) for usage, _ in SUBCOMMANDS.values())
+    lines = ["subcommands (run `toolsync <subcommand> --help` for its options):"]
+    lines += [f"  {usage:<{width}}  {text}" for usage, text in SUBCOMMANDS.values()]
+    return "\n".join(lines)
 
 
 def main():
@@ -133,8 +149,9 @@ def main():
 def run_sync():
     parser = argparse.ArgumentParser(
         prog="toolsync",
-        description="Scan a tools directory and wire every tool onto PATH. "
-                    "Subcommands: add, self-install, doctor, locate.")
+        description="Scan a tools directory and wire every tool onto PATH.",
+        epilog=_subcommand_help(),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--update", action="store_true", help="git pull clean repos before syncing")
     parser.add_argument("--force", metavar="NAME", action="append", default=[], help="re-run install+verify for this tool even if unchanged (repeatable)")
     parser.add_argument("--force-all", action="store_true", help="re-run install+verify for every tool")

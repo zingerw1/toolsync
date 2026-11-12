@@ -236,5 +236,49 @@ with tempfile.TemporaryDirectory() as d:
     finally:
         _restore_cfg(saved)
 
+# ── --help lists every subcommand ───────────────────────────────────────────
+# Regression: `locate` (and add / self-install / doctor) were only named inside
+# the description sentence, wrapped mid-word ("self-\ninstall"), with no entry
+# of their own like the options have. SUBCOMMANDS is now the single source of
+# truth for both the help listing and dispatch.
+import contextlib
+import io
+
+from toolsync import cli, universal
+
+
+def _help_text():
+    buf, saved = io.StringIO(), sys.argv
+    sys.argv = ["toolsync", "--help"]
+    try:
+        with contextlib.redirect_stdout(buf):
+            try:
+                cli.run_sync()
+            except SystemExit:
+                pass
+    finally:
+        sys.argv = saved
+    return buf.getvalue()
+
+
+_help = _help_text()
+for _name, (_usage, _text) in cli.SUBCOMMANDS.items():
+    check(f"--help lists subcommand '{_name}' on its own line",
+          any(ln.strip().startswith(_usage) for ln in _help.splitlines()), _help)
+check("--help describes locate", "find where a tool lives and how to run it" in _help, _help)
+check("--help no longer wraps a subcommand name mid-word", "self-\ninstall" not in _help, _help)
+
+# every listed subcommand is wired into dispatch and has its own --help
+for _name in cli.SUBCOMMANDS:
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            universal.dispatch(_name, ["--help"])
+        _ok = False  # argparse's --help always exits
+    except SystemExit as _e:
+        _ok = (_e.code == 0)
+    except KeyError:
+        _ok = False
+    check(f"dispatch('{_name}', --help) works (subcommand is wired up)", _ok)
+
 print(f"\nTOOLSYNC: {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
