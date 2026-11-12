@@ -7,3 +7,8 @@ dist/
 
 # Per-machine runtime state (not shared)
 state.json
+
+# Local dev environments and caches
+.venv/
+venv/
+.pytest_cache/
